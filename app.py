@@ -116,7 +116,9 @@ if analyze_btn and pr_url.strip():
         </div>
         """, unsafe_allow_html=True)
 
-        if result["truncated"]:
+        if result.get("chunked"):
+            st.success(f"已启用分段分析模式，逐文件分析了 {result['files_analyzed']} 个文件后汇总")
+        elif result["truncated"]:
             st.warning("diff 内容过长已截断，分析基于部分变更。建议对大型 PR 拆分为多个小 PR。")
 
         st.divider()
