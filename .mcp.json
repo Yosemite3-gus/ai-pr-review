@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bailian-vision": {
+      "command": "python",
+      "args": ["O:/超级AI/bailian-mcp/server.py"]
+    }
+  }
+}
