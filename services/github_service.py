@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 
+from services.utils import retry_on_network_error
+
 load_dotenv(override=True)
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -19,6 +21,7 @@ if GITHUB_TOKEN:
     HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
 
+@retry_on_network_error(max_retries=3)
 def _api(path: str) -> dict | list | str | None:
     """调用 GitHub REST API，自动处理分页和错误"""
     url = f"{BASE_URL}{path}" if path.startswith("/") else path
@@ -92,6 +95,7 @@ def fetch_pr_files(owner: str, repo: str, number: int) -> list[dict]:
     ]
 
 
+@retry_on_network_error(max_retries=3)
 def fetch_diff(owner: str, repo: str, number: int) -> str:
     """获取 PR 的 unified diff 原始文本"""
     headers = dict(HEADERS)

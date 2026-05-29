@@ -62,6 +62,70 @@ def build_analysis_prompt(pr_info: dict, diff: str) -> str:
 请开始分析。"""
 
 
+PER_FILE_PROMPT = """你是一位资深代码评审专家。请分析以下单个文件的代码变更。
+
+## 要求
+- 识别逻辑错误、边界遗漏、空值风险、安全漏洞、性能问题
+- 每个发现标注风险等级：🔴严重 / 🟡中等 / 🟢轻微
+- 给出具体的文件行号和修复建议
+- 如果没有发现任何问题，直接说"未发现问题"
+- 用中文输出，保持简洁，只输出关键发现"""
+
+
+def build_per_file_prompt(filename: str, file_diff: str) -> str:
+    """构建单文件分析 prompt"""
+    return f"""分析文件 `{filename}` 的变更：
+
+```diff
+{file_diff}
+```
+
+请指出发现的问题。"""
+
+
+AGGREGATION_PROMPT = """你是一位资深代码评审专家。下面是多个文件的独立分析结果，请汇总成一份完整的 PR Review 报告。
+
+## 输出格式
+严格按以下结构输出：
+
+### PR 变更总结
+综合所有文件的分析，用 3-5 句话概述整个 PR。
+
+### 风险代码识别
+汇总所有文件发现的风险，按严重程度排序（严重→中等→轻微），重复或相似的风险合并。
+每个风险保留原始的文件位置信息。
+
+### Review 建议
+汇总所有改进建议，去重后按优先级排列。
+
+### 总体评价
+1-2 句话总结，是否建议合并。"""
+
+
+def build_aggregation_prompt(pr_info: dict, per_file_results: list[dict]) -> str:
+    """构建汇总分析 prompt"""
+    results_text = []
+    for r in per_file_results:
+        if r.get("findings", "").strip():
+            results_text.append(f"### {r['filename']}\n{r['findings']}")
+        else:
+            results_text.append(f"### {r['filename']}\n未发现问题。")
+
+    return f"""请汇总以下 PR 的分析结果：
+
+## PR 信息
+- **标题**: {pr_info['title']}
+- **作者**: {pr_info['author']}
+- **描述**: {pr_info.get('body', '（无描述）')}
+- **变更统计**: {pr_info['changed_files']} 个文件, +{pr_info['additions']} -{pr_info['deletions']} 行
+
+## 各文件分析结果
+
+{chr(10).join(results_text)}
+
+请汇总输出完整的 Review 报告。"""
+
+
 def _format_file_list(files: list[dict]) -> str:
     """格式化文件列表为表格"""
     if not files:

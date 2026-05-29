@@ -1,10 +1,19 @@
 """AI 分析引擎 — 调用 DeepSeek 进行 PR 代码评审"""
 import os
+import re
+import time
 
-from openai import OpenAI
+from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 from dotenv import load_dotenv
 
-from services.prompts import SYSTEM_PROMPT, build_analysis_prompt
+from services.prompts import (
+    SYSTEM_PROMPT,
+    build_analysis_prompt,
+    PER_FILE_PROMPT,
+    build_per_file_prompt,
+    AGGREGATION_PROMPT,
+    build_aggregation_prompt,
+)
 
 load_dotenv(override=True)
 
@@ -17,66 +26,145 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 MODEL = "deepseek-chat"
 
-# diff 最大长度（字符），超出则截断，保留模型上下文空间给分析和输出
+# diff 大小阈值：超过此值启用按文件分段分析
 MAX_DIFF_CHARS = 50000
+# 单文件 diff 也设上限，防止单个超大文件撑爆上下文
+MAX_PER_FILE_CHARS = 30000
+
+
+def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int = 3) -> str:
+    """统一 LLM 调用，网络异常自动重试（指数退避）"""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content
+        except (APIConnectionError, APITimeoutError) as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)  # 1s → 2s → 4s
+        except APIError as e:
+            # 5xx 服务端错误才重试
+            if e.status_code is not None and e.status_code >= 500 and attempt < max_retries:
+                last_error = e
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+    raise last_error  # type: ignore
 
 
 def _truncate_diff(diff: str, max_chars: int = MAX_DIFF_CHARS) -> tuple[str, bool]:
-    """截断过长的 diff，保留前面的内容（文件头通常更重要）"""
+    """截断过长的 diff，保留前面的内容"""
     if len(diff) <= max_chars:
         return diff, False
     truncated = diff[:max_chars]
-    # 尝试在最后一个完整的行处截断
     last_newline = truncated.rfind("\n")
     if last_newline > 0:
         truncated = truncated[:last_newline]
     truncated += (
-        f"\n\n... (diff 内容已截断，原始大小 {len(diff)} 字符，"
-        f"当前显示 {len(truncated)} 字符)"
+        f"\n\n... (diff 内容已截断，原始大小 {len(diff)} 字符)"
     )
     return truncated, True
 
 
-def analyze_pr(pr_data: dict) -> dict:
-    """对 PR 进行 AI 分析，返回结构化结果
+def _split_diff_by_file(diff: str) -> list[tuple[str, str]]:
+    """将 unified diff 按文件拆分，返回 [(filename, file_diff), ...]
 
-    Args:
-        pr_data: fetch_pr_full() 返回的完整 PR 数据
+    diff 格式: diff --git a/path b/path
+    """
+    # 按 "diff --git " 分割，第一个是空（在第一个 diff --git 之前）
+    parts = re.split(r"\n(?=diff --git )", diff)
+    result = []
+    for part in parts:
+        if not part.strip():
+            continue
+        # 提取文件名：diff --git a/path/to/file b/path/to/file
+        m = re.match(r"diff --git a/(.+) b/(.+)", part)
+        if m:
+            filename = m.group(1)
+        else:
+            filename = "unknown"
+        result.append((filename, part.strip()))
+    return result
+
+
+def _analyze_single_file(filename: str, file_diff: str) -> dict:
+    """分析单个文件的 diff"""
+    diff, _ = _truncate_diff(file_diff, MAX_PER_FILE_CHARS)
+    prompt = build_per_file_prompt(filename, diff)
+    findings = _call_llm(PER_FILE_PROMPT, prompt, max_tokens=1024)
+    return {"filename": filename, "findings": findings.strip()}
+
+
+def analyze_pr(pr_data: dict) -> dict:
+    """对 PR 进行 AI 分析，自动选择单次分析或分段分析
 
     Returns:
         {
-            "summary": str,        # PR 变更总结
-            "risks": str,          # 风险代码识别
-            "suggestions": str,    # Review 建议
-            "overall": str,        # 总体评价
-            "raw": str,            # 原始 AI 回复
-            "truncated": bool,     # diff 是否被截断
-            "model": str,          # 使用的模型
+            "summary": str, "risks": str, "suggestions": str, "overall": str,
+            "raw": str, "truncated": bool, "model": str, "chunked": bool,
+            "files_analyzed": int,
         }
     """
-    diff, was_truncated = _truncate_diff(pr_data.get("diff", ""))
+    diff = pr_data.get("diff", "")
+
+    # 小 PR：单次分析
+    if len(diff) <= MAX_DIFF_CHARS:
+        return _analyze_single_pass(pr_data, diff)
+
+    # 大 PR：按文件分段分析
+    return _analyze_chunked(pr_data, diff)
+
+
+def _analyze_single_pass(pr_data: dict, diff: str) -> dict:
+    """单次分析（diff 在阈值内）"""
+    diff, was_truncated = _truncate_diff(diff)
     prompt = build_analysis_prompt(pr_data, diff)
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,  # 低温度，让输出更一致
-        max_tokens=4096,
-    )
-
-    raw_output = response.choices[0].message.content
-
-    # 解析 AI 回复中的四个部分
-    sections = _parse_sections(raw_output)
+    raw = _call_llm(SYSTEM_PROMPT, prompt)
+    sections = _parse_sections(raw)
 
     return {
         **sections,
-        "raw": raw_output,
+        "raw": raw,
         "truncated": was_truncated,
         "model": MODEL,
+        "chunked": False,
+        "files_analyzed": pr_data.get("changed_files", 0),
+    }
+
+
+def _analyze_chunked(pr_data: dict, diff: str) -> dict:
+    """分段分析：按文件拆分，逐文件分析，最后汇总"""
+    file_chunks = _split_diff_by_file(diff)
+    total_files = len(file_chunks)
+
+    # 第一步：逐个文件分析
+    per_file_results = []
+    for filename, file_diff in file_chunks:
+        result = _analyze_single_file(filename, file_diff)
+        per_file_results.append(result)
+
+    # 第二步：汇总所有文件的分析结果
+    agg_prompt = build_aggregation_prompt(pr_data, per_file_results)
+    raw = _call_llm(AGGREGATION_PROMPT, agg_prompt, max_tokens=4096)
+    sections = _parse_sections(raw)
+
+    return {
+        **sections,
+        "raw": raw,
+        "truncated": False,  # 分段分析不截断
+        "model": MODEL,
+        "chunked": True,
+        "files_analyzed": total_files,
     }
 
 
@@ -93,9 +181,7 @@ def _parse_sections(text: str) -> dict:
     current_content: list[str] = []
 
     for line in text.split("\n"):
-        line_lower = line.strip().lower()
         if line.startswith("###") or line.startswith("##"):
-            # 保存上一个 section
             if current_section and current_content:
                 result[current_section] = "\n".join(current_content).strip()
                 current_content = []
@@ -113,7 +199,6 @@ def _parse_sections(text: str) -> dict:
         elif current_section:
             current_content.append(line)
 
-    # 保存最后一个 section
     if current_section and current_content:
         result[current_section] = "\n".join(current_content).strip()
 
