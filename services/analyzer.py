@@ -23,8 +23,17 @@ BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 if not API_KEY:
     raise RuntimeError("DEEPSEEK_API_KEY 未设置，请在 .env 中配置")
 
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-MODEL = "deepseek-chat"
+deepseek_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+DEEPSEEK_MODEL = "deepseek-chat"
+
+# 百炼 Qwen 客户端（用于多模型对比）
+BAILIAN_API_KEY = os.getenv("BAILIAN_API_KEY", "")
+BAILIAN_BASE_URL = os.getenv("BAILIAN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+BAILIAN_MODEL = os.getenv("BAILIAN_MODEL", "qwen-plus")
+
+bailian_client = None
+if BAILIAN_API_KEY:
+    bailian_client = OpenAI(api_key=BAILIAN_API_KEY, base_url=BAILIAN_BASE_URL)
 
 # diff 大小阈值：超过此值启用按文件分段分析
 MAX_DIFF_CHARS = 50000
@@ -32,13 +41,14 @@ MAX_DIFF_CHARS = 50000
 MAX_PER_FILE_CHARS = 30000
 
 
-def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int = 3) -> str:
-    """统一 LLM 调用，网络异常自动重试（指数退避）"""
+def _call_llm_with_client(client: OpenAI, model: str, system: str, user: str,
+                          max_tokens: int = 4096, max_retries: int = 3) -> str:
+    """通用 LLM 调用，支持任意 OpenAI 兼容客户端"""
     last_error = None
     for attempt in range(max_retries + 1):
         try:
             resp = client.chat.completions.create(
-                model=MODEL,
+                model=model,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -50,9 +60,8 @@ def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int =
         except (APIConnectionError, APITimeoutError) as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2 ** attempt)  # 1s → 2s → 4s
+                time.sleep(2 ** attempt)
         except APIError as e:
-            # 5xx 服务端错误才重试
             if e.status_code is not None and e.status_code >= 500 and attempt < max_retries:
                 last_error = e
                 time.sleep(2 ** attempt)
@@ -60,6 +69,11 @@ def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int =
                 raise
 
     raise last_error  # type: ignore
+
+
+def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int = 3) -> str:
+    """DeepSeek LLM 调用（向后兼容）"""
+    return _call_llm_with_client(deepseek_client, DEEPSEEK_MODEL, system, user, max_tokens, max_retries)
 
 
 def _truncate_diff(diff: str, max_chars: int = MAX_DIFF_CHARS) -> tuple[str, bool]:
@@ -97,16 +111,16 @@ def _split_diff_by_file(diff: str) -> list[tuple[str, str]]:
     return result
 
 
-def _analyze_single_file(filename: str, file_diff: str) -> dict:
+def _analyze_single_file(filename: str, file_diff: str, client: OpenAI, model: str) -> dict:
     """分析单个文件的 diff"""
     diff, _ = _truncate_diff(file_diff, MAX_PER_FILE_CHARS)
     prompt = build_per_file_prompt(filename, diff)
-    findings = _call_llm(PER_FILE_PROMPT, prompt, max_tokens=1024)
+    findings = _call_llm_with_client(client, model, PER_FILE_PROMPT, prompt, max_tokens=1024)
     return {"filename": filename, "findings": findings.strip()}
 
 
 def analyze_pr(pr_data: dict) -> dict:
-    """对 PR 进行 AI 分析，自动选择单次分析或分段分析
+    """对 PR 进行 AI 分析（DeepSeek），自动选择单次分析或分段分析
 
     Returns:
         {
@@ -115,54 +129,86 @@ def analyze_pr(pr_data: dict) -> dict:
             "files_analyzed": int,
         }
     """
+    return _analyze_pr_with_model(pr_data, deepseek_client, DEEPSEEK_MODEL)
+
+
+def analyze_pr_compare(pr_data: dict) -> dict:
+    """多模型对比分析：DeepSeek + Qwen 分别分析，返回对比结果
+
+    Returns:
+        {
+            "deepseek": {...}, "qwen": {...} 或 None,
+            "truncated": bool, "chunked": bool, "files_analyzed": int,
+            "compare_mode": True,
+        }
+    """
+    diff = pr_data.get("diff", "")
+    is_chunked = len(diff) > MAX_DIFF_CHARS
+
+    # DeepSeek 分析（始终可用）
+    deepseek_result = _analyze_pr_with_model(pr_data, deepseek_client, DEEPSEEK_MODEL)
+
+    # Qwen 分析（如果百炼未配置则跳过）
+    qwen_result = None
+    if bailian_client:
+        qwen_result = _analyze_pr_with_model(pr_data, bailian_client, BAILIAN_MODEL)
+
+    return {
+        "deepseek": deepseek_result,
+        "qwen": qwen_result,
+        "truncated": deepseek_result.get("truncated", False),
+        "chunked": is_chunked,
+        "files_analyzed": deepseek_result.get("files_analyzed", 0),
+        "compare_mode": True,
+    }
+
+
+def _analyze_pr_with_model(pr_data: dict, client: OpenAI, model: str) -> dict:
+    """使用指定模型分析 PR"""
     diff = pr_data.get("diff", "")
 
-    # 小 PR：单次分析
     if len(diff) <= MAX_DIFF_CHARS:
-        return _analyze_single_pass(pr_data, diff)
+        return _analyze_single_pass(pr_data, diff, client, model)
 
-    # 大 PR：按文件分段分析
-    return _analyze_chunked(pr_data, diff)
+    return _analyze_chunked(pr_data, diff, client, model)
 
 
-def _analyze_single_pass(pr_data: dict, diff: str) -> dict:
+def _analyze_single_pass(pr_data: dict, diff: str, client: OpenAI, model: str) -> dict:
     """单次分析（diff 在阈值内）"""
     diff, was_truncated = _truncate_diff(diff)
     prompt = build_analysis_prompt(pr_data, diff)
-    raw = _call_llm(SYSTEM_PROMPT, prompt)
+    raw = _call_llm_with_client(client, model, SYSTEM_PROMPT, prompt)
     sections = _parse_sections(raw)
 
     return {
         **sections,
         "raw": raw,
         "truncated": was_truncated,
-        "model": MODEL,
+        "model": model,
         "chunked": False,
         "files_analyzed": pr_data.get("changed_files", 0),
     }
 
 
-def _analyze_chunked(pr_data: dict, diff: str) -> dict:
+def _analyze_chunked(pr_data: dict, diff: str, client: OpenAI, model: str) -> dict:
     """分段分析：按文件拆分，逐文件分析，最后汇总"""
     file_chunks = _split_diff_by_file(diff)
     total_files = len(file_chunks)
 
-    # 第一步：逐个文件分析
     per_file_results = []
     for filename, file_diff in file_chunks:
-        result = _analyze_single_file(filename, file_diff)
+        result = _analyze_single_file(filename, file_diff, client, model)
         per_file_results.append(result)
 
-    # 第二步：汇总所有文件的分析结果
     agg_prompt = build_aggregation_prompt(pr_data, per_file_results)
-    raw = _call_llm(AGGREGATION_PROMPT, agg_prompt, max_tokens=4096)
+    raw = _call_llm_with_client(client, model, AGGREGATION_PROMPT, agg_prompt, max_tokens=4096)
     sections = _parse_sections(raw)
 
     return {
         **sections,
         "raw": raw,
-        "truncated": False,  # 分段分析不截断
-        "model": MODEL,
+        "truncated": False,
+        "model": model,
         "chunked": True,
         "files_analyzed": total_files,
     }
