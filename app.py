@@ -3,6 +3,7 @@ import streamlit as st
 
 from services.github_service import fetch_pr_full, parse_pr_url
 from services.analyzer import analyze_pr
+from services.utils import generate_report
 
 st.set_page_config(
     page_title="AI PR Review",
@@ -163,6 +164,16 @@ if analyze_btn and pr_url.strip():
         # 原始输出（折叠）
         with st.expander(" 查看 AI 原始输出"):
             st.code(result["raw"], language="markdown")
+
+        # 下载报告
+        report_md = generate_report(pr_data, result)
+        st.download_button(
+            label=" 下载 Markdown 报告",
+            data=report_md,
+            file_name=f"PR-Review-{pr_data['repo']}-#{pr_data['pr_number']}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
         st.caption(f"分析模型: {result['model']}")
 
