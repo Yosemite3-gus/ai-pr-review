@@ -22,8 +22,8 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Yosemite3-gus/qiniu-intern.git
-cd qiniu-intern
+git clone https://github.com/Yosemite3-gus/ai-pr-review.git
+cd ai-pr-review
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -51,7 +51,7 @@ GitHub Token 获取：https://github.com/settings/tokens → Fine-grained token 
 ## 项目结构
 
 ```
-qiniu-intern/
+ai-pr-review/
 ├── app.py                      # Streamlit 主界面
 ├── services/
 │   ├── github_service.py       # GitHub REST API 封装
