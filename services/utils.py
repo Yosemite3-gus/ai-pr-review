@@ -87,3 +87,51 @@ def generate_report(pr_data: dict, result: dict) -> str:
     lines.append("*由 AI PR Review 助手生成*")
 
     return "\n".join(lines)
+
+
+def generate_compare_report(pr_data: dict, result: dict) -> str:
+    """生成多模型对比的 Markdown 报告"""
+    now = datetime.now(CST).strftime("%Y-%m-%d %H:%M")
+    ds = result["deepseek"]
+    qw = result.get("qwen") or {}
+
+    lines = [
+        "# AI PR Review 报告（多模型对比）",
+        "",
+        f"**PR**: [{pr_data['title']}]({pr_data['url']})",
+        f"**作者**: {pr_data['author']}",
+        f"**分支**: {pr_data['head_branch']} → {pr_data['base_branch']}",
+        f"**分析时间**: {now} (北京时间)",
+        f"**分析模型**: DeepSeek ({ds['model']}) + Qwen ({qw.get('model', 'N/A')})",
+        f"**变更规模**: {pr_data['changed_files']} 个文件, +{pr_data['additions']} -{pr_data['deletions']} 行",
+        "",
+        "---",
+        "",
+    ]
+
+    sections = [
+        ("PR 变更总结", "summary"),
+        ("风险代码识别", "risks"),
+        ("Review 建议", "suggestions"),
+        ("总体评价", "overall"),
+    ]
+
+    for heading, key in sections:
+        lines.append(f"## {heading}")
+        lines.append("")
+        lines.append("### DeepSeek")
+        lines.append("")
+        lines.append(ds.get(key, "") or "（无内容）")
+        lines.append("")
+        lines.append("### Qwen")
+        lines.append("")
+        if qw:
+            lines.append(qw.get(key, "") or "（无内容）")
+        else:
+            lines.append("（Qwen 未配置）")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("*由 AI PR Review 助手生成（多模型对比模式）*")
+
+    return "\n".join(lines)
