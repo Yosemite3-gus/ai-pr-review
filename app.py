@@ -91,82 +91,83 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 # ── 分析逻辑 ──────────────────────────────────────────
 if analyze_btn and pr_url.strip():
-    with st.spinner("正在分析 PR..."):
-        try:
-            # Step 1: 获取 PR 数据
-            st.info("正在获取 PR 信息...")
+    try:
+        # Step 1: 获取 PR 数据
+        with st.status("正在获取 PR 信息...", expanded=False) as status:
             pr_data = fetch_pr_full(pr_url.strip())
+            status.update(label="PR 信息获取完成", state="complete", expanded=False)
 
-            # Step 2: AI 分析
-            st.info(f"正在用 AI 分析 {pr_data['changed_files']} 个文件...")
+        # Step 2: AI 分析
+        with st.status(f"正在用 AI 分析 {pr_data['changed_files']} 个文件...", expanded=False) as status:
             result = analyze_pr(pr_data)
+            status.update(label="AI 分析完成", state="complete", expanded=False)
 
-            # ── 结果展示 ──────────────────────────────
+        # ── 结果展示 ──────────────────────────────
 
-            # PR 基本信息条
-            st.markdown(f"""
-            <div class="pr-meta">
-                <span>{pr_data['author']}</span>
-                <span>{pr_data['head_branch']} → {pr_data['base_branch']}</span>
-                <span>{pr_data['changed_files']} 文件</span>
-                <span style="color:#4ade80">+{pr_data['additions']}</span>
-                <span style="color:#f87171">-{pr_data['deletions']}</span>
-                <span>状态: {pr_data['state']}</span>
-            </div>
-            """, unsafe_allow_html=True)
+        # PR 基本信息条
+        st.markdown(f"""
+        <div class="pr-meta">
+            <span>{pr_data['author']}</span>
+            <span>{pr_data['head_branch']} → {pr_data['base_branch']}</span>
+            <span>{pr_data['changed_files']} 文件</span>
+            <span style="color:#4ade80">+{pr_data['additions']}</span>
+            <span style="color:#f87171">-{pr_data['deletions']}</span>
+            <span>状态: {pr_data['state']}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-            if result["truncated"]:
-                st.warning("diff 内容过长已截断，分析基于部分变更。建议对大型 PR 拆分为多个小 PR。")
+        if result["truncated"]:
+            st.warning("diff 内容过长已截断，分析基于部分变更。建议对大型 PR 拆分为多个小 PR。")
 
-            st.divider()
+        st.divider()
 
-            # 四个分析栏目
-            tab1, tab2, tab3, tab4 = st.tabs([
-                " PR 变更总结",
-                " 风险代码识别",
-                " Review 建议",
-                " 总体评价",
-            ])
+        # 四个分析栏目
+        tab1, tab2, tab3, tab4 = st.tabs([
+            " PR 变更总结",
+            " 风险代码识别",
+            " Review 建议",
+            " 总体评价",
+        ])
 
-            with tab1:
-                if result["summary"]:
-                    st.markdown(result["summary"])
-                else:
-                    st.info("AI 未输出此部分")
+        with tab1:
+            if result["summary"]:
+                st.markdown(result["summary"])
+            else:
+                st.info("AI 未输出此部分")
 
-            with tab2:
-                if result["risks"]:
-                    # 给风险内容加上颜色标记
-                    colored = result["risks"]
-                    colored = colored.replace("严重", '<span class="risk-high">严重</span>')
-                    colored = colored.replace("中等", '<span class="risk-medium">中等</span>')
-                    colored = colored.replace("轻微", '<span class="risk-low">轻微</span>')
-                    st.markdown(colored, unsafe_allow_html=True)
-                else:
-                    st.success("未发现明显的风险代码")
+        with tab2:
+            if result["risks"]:
+                # 给风险内容加上颜色标记
+                colored = result["risks"]
+                colored = colored.replace("严重", '<span class="risk-high">严重</span>')
+                colored = colored.replace("中等", '<span class="risk-medium">中等</span>')
+                colored = colored.replace("轻微", '<span class="risk-low">轻微</span>')
+                st.markdown(colored, unsafe_allow_html=True)
+            else:
+                st.success("未发现明显的风险代码")
 
-            with tab3:
-                if result["suggestions"]:
-                    st.markdown(result["suggestions"])
-                else:
-                    st.info("AI 未输出此部分")
+        with tab3:
+            if result["suggestions"]:
+                st.markdown(result["suggestions"])
+            else:
+                st.info("AI 未输出此部分")
 
-            with tab4:
-                if result["overall"]:
-                    st.markdown(result["overall"])
-                else:
-                    st.info("AI 未输出此部分")
+        with tab4:
+            if result["overall"]:
+                st.markdown(result["overall"])
+            else:
+                st.info("AI 未输出此部分")
 
-            # 原始输出（折叠）
-            with st.expander(" 查看 AI 原始输出"):
-                st.code(result["raw"], language="markdown")
+        # 原始输出（折叠）
+        with st.expander(" 查看 AI 原始输出"):
+            st.code(result["raw"], language="markdown")
 
-            st.caption(f"分析模型: {result['model']}")
+        st.caption(f"分析模型: {result['model']}")
 
-        except ValueError as e:
-            st.error(f"输入错误: {e}")
-        except Exception as e:
-            st.error(f"分析失败: {e}")
+    except ValueError as e:
+        st.error(f"输入错误: {e}")
+    except Exception as e:
+        st.error(f"分析失败: {e}")
 
 elif analyze_btn and not pr_url.strip():
     st.warning("请输入 GitHub PR 地址")
