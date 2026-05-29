@@ -4,12 +4,13 @@ import streamlit as st
 from services.router import fetch_pr_full
 from services.analyzer import analyze_pr
 from services.utils import generate_report
+from services.history import save_analysis, load_history, delete_analysis
 
 st.set_page_config(
     page_title="AI PR Review",
     page_icon="",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ── 样式 ──────────────────────────────────────────────
@@ -67,6 +68,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── 侧边栏：分析历史 ────────────────────────────────
+with st.sidebar:
+    st.markdown("###  分析历史")
+
+    # "新建分析"按钮 — 清空选中状态
+    if st.button(" 新建分析", use_container_width=True, type="primary"):
+        st.session_state.pop("selected_history", None)
+        st.rerun()
+
+    st.divider()
+
+    history = load_history()
+    if not history:
+        st.caption("暂无历史记录，完成一次分析后自动保存。")
+    else:
+        for i, entry in enumerate(history):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                label = f"{entry['pr_title'][:30]}..."
+                if st.button(label, key=f"hist_{entry['id']}", use_container_width=True):
+                    st.session_state["selected_history"] = entry
+                    st.rerun()
+            with col2:
+                if st.button(" ", key=f"del_{entry['id']}", help="删除此记录"):
+                    delete_analysis(entry["id"])
+                    st.session_state.pop("selected_history", None)
+                    st.rerun()
+            st.caption(f"{entry['timestamp']} | {entry.get('platform', 'github')}")
+
 # ── Hero ──────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
@@ -74,6 +104,32 @@ st.markdown("""
     <p>输入 GitHub PR 链接，AI 自动分析代码变更 — 总结 · 风险识别 · Review 建议</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ── 历史记录回看 ──────────────────────────────────────
+selected = st.session_state.get("selected_history")
+if selected:
+    st.info(f" 正在查看历史分析: **{selected['pr_title']}** ({selected['timestamp']})")
+
+    r = selected["result"]
+    pr_url_display = selected.get("pr_url", "")
+
+    st.markdown(f"""
+    <div class="pr-meta">
+        <span>{selected.get('pr_author', '')}</span>
+        <span>{selected.get('head_branch', '')} → {selected.get('base_branch', '')}</span>
+        <span>{selected.get('changed_files', 0)} 文件</span>
+        <span style="color:#4ade80">+{selected.get('additions', 0)}</span>
+        <span style="color:#f87171">-{selected.get('deletions', 0)}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if r.get("compare_mode"):
+        _render_compare_history(r)
+    else:
+        _render_single_history(r)
+
+    st.caption(f"分析模型: {r.get('model', 'N/A')} | 分析时间: {selected['timestamp']}")
+    st.stop()  # 不显示下方的输入区
 
 # ── 输入区 ────────────────────────────────────────────
 st.markdown('<div class="input-section">', unsafe_allow_html=True)
@@ -102,6 +158,9 @@ if analyze_btn and pr_url.strip():
         with st.status(f"正在用 AI 分析 {pr_data['changed_files']} 个文件...", expanded=False) as status:
             result = analyze_pr(pr_data)
             status.update(label="AI 分析完成", state="complete", expanded=False)
+
+        # 自动保存到历史记录
+        save_analysis(pr_data, result)
 
         # ── 结果展示 ──────────────────────────────
 
@@ -184,3 +243,105 @@ if analyze_btn and pr_url.strip():
 
 elif analyze_btn and not pr_url.strip():
     st.warning("请输入 GitHub PR 地址")
+
+
+# ── 历史记录渲染 ──────────────────────────────────────
+
+def _render_single_history(r: dict):
+    """从历史记录渲染单模型结果"""
+    tab1, tab2, tab3, tab4 = st.tabs([
+        " PR 变更总结", " 风险代码识别", " Review 建议", " 总体评价",
+    ])
+    with tab1:
+        st.markdown(r.get("summary", "（无内容）"))
+    with tab2:
+        risks = r.get("risks", "")
+        if risks:
+            risks = risks.replace("严重", '<span class="risk-high">严重</span>')
+            risks = risks.replace("中等", '<span class="risk-medium">中等</span>')
+            risks = risks.replace("轻微", '<span class="risk-low">轻微</span>')
+            st.markdown(risks, unsafe_allow_html=True)
+        else:
+            st.success("未发现明显的风险代码")
+    with tab3:
+        st.markdown(r.get("suggestions", "（无内容）"))
+    with tab4:
+        st.markdown(r.get("overall", "（无内容）"))
+
+    with st.expander(" 查看 AI 原始输出"):
+        st.code(r.get("raw", ""), language="markdown")
+
+
+def _render_compare_history(r: dict):
+    """从历史记录渲染多模型对比结果"""
+    ds = r.get("deepseek", {})
+    qw = r.get("qwen")
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        " PR 变更总结", " 风险代码识别", " Review 建议", " 总体评价",
+    ])
+
+    with tab1:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**DeepSeek**")
+            st.markdown(ds.get("summary", "（无内容）"))
+        with c2:
+            st.markdown("**Qwen**")
+            st.markdown(qw.get("summary", "（无内容）") if qw else "Qwen 未配置")
+
+    with tab2:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**DeepSeek**")
+            risks = ds.get("risks", "")
+            if risks:
+                risks = risks.replace("严重", '<span class="risk-high">严重</span>')
+                risks = risks.replace("中等", '<span class="risk-medium">中等</span>')
+                risks = risks.replace("轻微", '<span class="risk-low">轻微</span>')
+                st.markdown(risks, unsafe_allow_html=True)
+            else:
+                st.success("未发现")
+        with c2:
+            st.markdown("**Qwen**")
+            if qw:
+                risks = qw.get("risks", "")
+                if risks:
+                    risks = risks.replace("严重", '<span class="risk-high">严重</span>')
+                    risks = risks.replace("中等", '<span class="risk-medium">中等</span>')
+                    risks = risks.replace("轻微", '<span class="risk-low">轻微</span>')
+                    st.markdown(risks, unsafe_allow_html=True)
+                else:
+                    st.success("未发现")
+            else:
+                st.warning("Qwen 未配置")
+
+    with tab3:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**DeepSeek**")
+            st.markdown(ds.get("suggestions", "（无内容）"))
+        with c2:
+            st.markdown("**Qwen**")
+            st.markdown(qw.get("suggestions", "（无内容）") if qw else "Qwen 未配置")
+
+    with tab4:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**DeepSeek**")
+            st.markdown(ds.get("overall", "（无内容）"))
+        with c2:
+            st.markdown("**Qwen**")
+            st.markdown(qw.get("overall", "（无内容）") if qw else "Qwen 未配置")
+
+    with st.expander(" 查看 AI 原始输出"):
+        ca, cb = st.columns(2)
+        with ca:
+            st.caption(f"DeepSeek ({ds.get('model', '')})")
+            st.code(ds.get("raw", ""), language="markdown")
+        with cb:
+            if qw:
+                st.caption(f"Qwen ({qw.get('model', '')})")
+                st.code(qw.get("raw", ""), language="markdown")
+            else:
+                st.warning("Qwen 未配置")

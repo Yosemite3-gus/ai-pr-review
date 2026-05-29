@@ -4,6 +4,9 @@
 *.pem
 credentials.*
 
+# 分析历史记录
+analysis_history.json
+
 # Python
 __pycache__/
 *.pyc
