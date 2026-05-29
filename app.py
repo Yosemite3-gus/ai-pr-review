@@ -1,7 +1,7 @@
 """AI PR Review 助手 — Streamlit 主界面"""
 import streamlit as st
 
-from services.github_service import fetch_pr_full, parse_pr_url
+from services.router import fetch_pr_full
 from services.analyzer import analyze_pr
 from services.utils import generate_report
 
