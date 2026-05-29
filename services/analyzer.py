@@ -1,8 +1,9 @@
 """AI 分析引擎 — 调用 DeepSeek 进行 PR 代码评审"""
 import os
 import re
+import time
 
-from openai import OpenAI
+from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 from dotenv import load_dotenv
 
 from services.prompts import (
@@ -31,18 +32,34 @@ MAX_DIFF_CHARS = 50000
 MAX_PER_FILE_CHARS = 30000
 
 
-def _call_llm(system: str, user: str, max_tokens: int = 4096) -> str:
-    """统一 LLM 调用"""
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.3,
-        max_tokens=max_tokens,
-    )
-    return resp.choices[0].message.content
+def _call_llm(system: str, user: str, max_tokens: int = 4096, max_retries: int = 3) -> str:
+    """统一 LLM 调用，网络异常自动重试（指数退避）"""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content
+        except (APIConnectionError, APITimeoutError) as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)  # 1s → 2s → 4s
+        except APIError as e:
+            # 5xx 服务端错误才重试
+            if e.status_code is not None and e.status_code >= 500 and attempt < max_retries:
+                last_error = e
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+    raise last_error  # type: ignore
 
 
 def _truncate_diff(diff: str, max_chars: int = MAX_DIFF_CHARS) -> tuple[str, bool]:
