@@ -6,6 +6,106 @@ from services.analyzer import analyze_pr, analyze_pr_compare
 from services.utils import generate_report, generate_compare_report
 from services.history import save_analysis, load_history, delete_analysis
 
+THREEJS_HTML = r"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body { margin: 0; overflow: hidden; background: #fafafa; }
+    canvas { display: block; }
+</style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js">
+</script>
+<script>
+(function() {
+    var PARTICLE_COUNT = 800;
+    var RADIUS = 2.2;
+
+    var scene = new THREE.Scene();
+    var camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.z = 5;
+
+    var renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    renderer.setClearColor(0xfafafa, 1);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    // Soft dot texture
+    var texCanvas = document.createElement('canvas');
+    texCanvas.width = 32; texCanvas.height = 32;
+    var ctx = texCanvas.getContext('2d');
+    var gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gradient.addColorStop(0, 'rgba(0,0,0,1)');
+    gradient.addColorStop(0.25, 'rgba(0,0,0,0.9)');
+    gradient.addColorStop(0.6, 'rgba(0,0,0,0.4)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 32, 32);
+    var dotTexture = new THREE.CanvasTexture(texCanvas);
+
+    var geometry = new THREE.BufferGeometry();
+    var positions = new Float32Array(PARTICLE_COUNT * 3);
+    var colors = new Float32Array(PARTICLE_COUNT * 3);
+
+    for (var i = 0; i < PARTICLE_COUNT; i++) {
+        var theta = Math.random() * Math.PI * 2;
+        var phi = Math.acos(2 * Math.random() - 1);
+        var x = RADIUS * Math.sin(phi) * Math.cos(theta);
+        var y = RADIUS * Math.sin(phi) * Math.sin(theta);
+        var z = RADIUS * Math.cos(phi);
+
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = z;
+
+        // Left bright, right dark gradient
+        var t = (x + RADIUS) / (2 * RADIUS);
+        var shade = 0.85 - t * 0.73;
+        colors[i * 3] = shade;
+        colors[i * 3 + 1] = shade;
+        colors[i * 3 + 2] = shade;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    var material = new THREE.PointsMaterial({
+        size: 0.06,
+        map: dotTexture,
+        vertexColors: true,
+        blending: THREE.NormalBlending,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.7,
+    });
+
+    var sphere = new THREE.Points(geometry, material);
+    scene.add(sphere);
+
+    function animate() {
+        requestAnimationFrame(animate);
+        sphere.rotation.y += 0.002;
+        sphere.rotation.x += 0.0005;
+        renderer.render(scene, camera);
+    }
+
+    function resize() {
+        var container = document.body;
+        var w = container.clientWidth;
+        var h = container.clientHeight;
+        var size = Math.min(w, h);
+        renderer.setSize(size, size);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    animate();
+})();
+</script>
+</body>
+</html>
+"""
+
 st.set_page_config(
     page_title="AI PR Review",
     page_icon="",
@@ -16,55 +116,188 @@ st.set_page_config(
 # ── 样式 ──────────────────────────────────────────────
 st.markdown("""
 <style>
-/* 全局暗色背景 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* 全局 */
+html, body, .stApp {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #fafafa;
+}
 .stApp {
-    background: linear-gradient(135deg, #0a0e1a 0%, #0d1525 40%, #0f1629 100%);
+    background-image:
+        linear-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 0, 0, 0.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-position: center center;
 }
 .stApp > header { background: transparent !important; }
 
 /* Hero */
-.hero { text-align: center; padding: 2rem 0 1.5rem; }
+.hero { padding: 1.5rem 0 1rem; }
 .hero h1 {
-    font-size: 2.6rem;
+    font-size: 2.8rem;
     font-weight: 800;
-    background: linear-gradient(135deg, #60a5fa, #34d399);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: #1a1a1a;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
     margin-bottom: 0.3rem;
 }
-.hero p { color: #94a3b8; font-size: 1.05rem; }
+.hero p { color: #666666; font-size: 1rem; line-height: 1.5; }
+.hero .label-tag {
+    display: inline-block;
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: #888888;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+}
+.hero .label-tag::before {
+    content: "—— ";
+    color: #cccccc;
+}
 
 /* 输入区 */
 .input-section {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 16px;
+    background: #ffffff;
+    border: 1px solid #e5e5e5;
+    border-radius: 12px;
     padding: 1.5rem;
     margin-bottom: 1.5rem;
 }
-.input-section label { color: #cbd5e1 !important; font-weight: 600; }
 
 /* 结果卡片 */
 .section-card {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
+    background: #ffffff;
+    border: 1px solid #e5e5e5;
     border-radius: 12px;
     padding: 1.5rem;
     margin-bottom: 1rem;
 }
-.section-card h3 { margin-top: 0; color: #e2e8f0; }
+.section-card h3 { margin-top: 0; color: #1a1a1a; }
 
 /* 风险标记 */
-.risk-high { color: #f87171; font-weight: 700; }
-.risk-medium { color: #fbbf24; font-weight: 700; }
-.risk-low { color: #4ade80; font-weight: 700; }
+.risk-high { color: #dc2626; font-weight: 700; }
+.risk-medium { color: #d97706; font-weight: 700; }
+.risk-low { color: #16a34a; font-weight: 700; }
 
 /* PR 信息条 */
 .pr-meta {
-    display: flex; gap: 1.5rem; flex-wrap: wrap;
-    color: #94a3b8; font-size: 0.9rem;
+    display: flex; gap: 0.75rem; flex-wrap: wrap;
+    color: #666666; font-size: 0.85rem; margin: 0.75rem 0;
 }
-.pr-meta span { background: rgba(255,255,255,0.05); padding: 0.25rem 0.75rem; border-radius: 20px; }
+.pr-meta span {
+    background: transparent;
+    border: 1px solid #d4d4d4;
+    padding: 0.2rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.78rem;
+    color: #555555;
+}
+
+/* 统计信息条 */
+.stats-bar {
+    padding: 0.75rem 1rem;
+    border-top: 1px solid #e5e5e5;
+    display: flex; gap: 1rem; flex-wrap: wrap;
+    font-size: 0.75rem;
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    color: #888888; margin-top: 1.5rem;
+}
+.stats-sep { color: #d4d4d4; }
+
+/* 按钮 — 胶囊形 */
+.stButton > button {
+    border-radius: 9999px !important;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600; font-size: 0.875rem;
+    padding: 0.5rem 1.5rem;
+    border: 1.5px solid #1a1a1a;
+    background: #1a1a1a;
+    color: #ffffff;
+    transition: all 0.15s ease;
+}
+.stButton > button:hover {
+    background: #333333;
+    border-color: #333333;
+}
+.stButton > button[kind="secondary"] {
+    background: transparent;
+    color: #1a1a1a;
+    border: 1.5px solid #d4d4d4;
+}
+
+/* 下载按钮 */
+.stDownloadButton > button {
+    border-radius: 9999px !important;
+    border: 1.5px solid #d4d4d4;
+    background: transparent;
+    color: #1a1a1a;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+}
+.stDownloadButton > button:hover {
+    border-color: #1a1a1a;
+    color: #1a1a1a;
+    background: #f5f5f5;
+}
+
+/* 输入框 */
+.stTextInput > div > div > input {
+    border-radius: 12px;
+    border: 1.5px solid #e5e5e5;
+    background: #ffffff;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9rem;
+    padding: 0.75rem 1rem;
+}
+.stTextInput > div > div > input:focus {
+    border-color: #1a1a1a;
+    box-shadow: none;
+}
+
+/* Tabs — 下划线风格 */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 2rem;
+    border-bottom: 1px solid #e5e5e5;
+}
+.stTabs [data-baseweb="tab"] {
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    font-size: 0.9rem;
+    color: #999999;
+    background: transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 0.5rem 0;
+}
+.stTabs [aria-selected="true"] {
+    color: #1a1a1a;
+    border-bottom-color: #1a1a1a;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background-color: #ffffff;
+    border-right: 1px solid #e5e5e5;
+}
+
+/* Checkbox */
+.stCheckbox label {
+    font-family: 'Inter', sans-serif;
+    color: #1a1a1a;
+}
+
+/* Expander */
+.stExpander {
+    border: 1px solid #e5e5e5;
+    border-radius: 12px;
+}
+
+/* Success/Warning/Info/Error 提示条 */
+[data-testid="stNotification"] {
+    border-radius: 12px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,12 +331,17 @@ with st.sidebar:
             st.caption(f"{entry['timestamp']} | {entry.get('platform', 'github')}")
 
 # ── Hero ──────────────────────────────────────────────
-st.markdown("""
-<div class="hero">
-    <h1>AI PR Review 助手</h1>
-    <p>输入 GitHub PR 链接，AI 自动分析代码变更 — 总结 · 风险识别 · Review 建议</p>
-</div>
-""", unsafe_allow_html=True)
+hero_left, hero_right = st.columns([3, 2])
+with hero_left:
+    st.markdown("""
+    <div class="hero">
+        <div class="label-tag">AI Code Review Platform</div>
+        <h1>AI PR Review</h1>
+        <p>输入 GitHub / Gitee PR 链接，AI 自动分析代码变更 — 总结 · 风险识别 · Review 建议</p>
+    </div>
+    """, unsafe_allow_html=True)
+with hero_right:
+    st.components.v1.html(THREEJS_HTML, height=420)
 
 # ── 历史记录回看 ──────────────────────────────────────
 selected = st.session_state.get("selected_history")
@@ -118,8 +356,8 @@ if selected:
         <span>{selected.get('pr_author', '')}</span>
         <span>{selected.get('head_branch', '')} → {selected.get('base_branch', '')}</span>
         <span>{selected.get('changed_files', 0)} 文件</span>
-        <span style="color:#4ade80">+{selected.get('additions', 0)}</span>
-        <span style="color:#f87171">-{selected.get('deletions', 0)}</span>
+        <span style="color:#16a34a">+{selected.get('additions', 0)}</span>
+        <span style="color:#dc2626">-{selected.get('deletions', 0)}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -132,20 +370,16 @@ if selected:
     st.stop()  # 不显示下方的输入区
 
 # ── 输入区 ────────────────────────────────────────────
-st.markdown('<div class="input-section">', unsafe_allow_html=True)
 pr_url = st.text_input(
-    "GitHub PR 地址",
+    "PR 地址",
     placeholder="https://github.com/owner/repo/pull/123",
     label_visibility="collapsed",
 )
-col1, col2, col3, col4 = st.columns([1, 1, 1.5, 3.5])
+col1, col2, col3 = st.columns([1, 1, 3])
 with col1:
-    analyze_btn = st.button("开始分析", type="primary", use_container_width=True)
+    analyze_btn = st.button("Start Analysis", type="primary", use_container_width=True)
 with col2:
-    compare_mode = st.checkbox("多模型对比", help="DeepSeek + Qwen 交叉验证")
-with col3:
-    pass
-st.markdown('</div>', unsafe_allow_html=True)
+    compare_mode = st.checkbox("Multi-model", help="DeepSeek + Qwen 交叉验证")
 
 # ── 分析逻辑 ──────────────────────────────────────────
 if analyze_btn and pr_url.strip():
@@ -176,8 +410,8 @@ if analyze_btn and pr_url.strip():
             <span>{pr_data['author']}</span>
             <span>{pr_data['head_branch']} → {pr_data['base_branch']}</span>
             <span>{pr_data['changed_files']} 文件</span>
-            <span style="color:#4ade80">+{pr_data['additions']}</span>
-            <span style="color:#f87171">-{pr_data['deletions']}</span>
+            <span style="color:#16a34a">+{pr_data['additions']}</span>
+            <span style="color:#dc2626">-{pr_data['deletions']}</span>
             <span>状态: {pr_data['state']}</span>
         </div>
         """, unsafe_allow_html=True)
@@ -226,10 +460,27 @@ if analyze_btn and pr_url.strip():
             use_container_width=True,
         )
 
+        # 统计信息条
+        model_label = ""
         if compare_mode:
-            st.caption(f"分析模型: DeepSeek ({result['deepseek']['model']}) + Qwen ({result.get('qwen', {}).get('model', 'N/A')})")
+            model_label = f"DeepSeek + Qwen"
         else:
-            st.caption(f"分析模型: {result['model']}")
+            model_label = result.get('model', 'N/A')
+        st.markdown(f"""
+        <div class="stats-bar">
+            <span>PR #{pr_data['pr_number']}</span>
+            <span class="stats-sep">|</span>
+            <span>{pr_data['changed_files']} files</span>
+            <span class="stats-sep">|</span>
+            <span style="color:#16a34a">+{pr_data['additions']}</span>
+            <span class="stats-sep">|</span>
+            <span style="color:#dc2626">-{pr_data['deletions']}</span>
+            <span class="stats-sep">|</span>
+            <span>{pr_data['head_branch']} → {pr_data['base_branch']}</span>
+            <span class="stats-sep">|</span>
+            <span>Model: {model_label}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     except ValueError as e:
         st.error(f"输入错误: {e}")
